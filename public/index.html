@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>Voice Call</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎙</text></svg>">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -740,19 +741,28 @@ function setStatus(msg, cls) {
   else statusEl.style.color = 'rgba(255,255,255,0.5)';
 }
 
+var lastAssistantRow = null;
 function appendTranscript(role, text) {
   if (!text || !text.trim()) return;
+  // For assistant streaming: append to the last assistant row if it exists
+  if (role === 'assistant' && lastAssistantRow) {
+    var content = lastAssistantRow.querySelector('.content');
+    if (content) { content.textContent += text; transcript.scrollTop = transcript.scrollHeight; return; }
+  }
   var row = document.createElement('div');
   row.className = 'msg ' + (role === 'user' ? 'user' : 'assistant');
   var label = document.createElement('span');
   label.className = 'label';
   label.textContent = role === 'user' ? 'You' : botName;
   var content = document.createElement('span');
+  content.className = 'content';
   content.textContent = text;
   row.appendChild(label);
   row.appendChild(content);
   transcript.insertBefore(row, dbgOverlayEl);
   transcript.scrollTop = transcript.scrollHeight;
+  if (role === 'assistant') lastAssistantRow = row;
+  if (role === 'user') lastAssistantRow = null; // new user msg resets accumulation
 }
 
 function setAvatarSpeaking(active) {
@@ -1070,7 +1080,7 @@ async function startGeminiCall(session, thinkingLevel) {
   await audioCtx.resume();
   dbg('AudioContext ready: ' + audioCtx.sampleRate + 'Hz');
 
-  var wsUrl = session.wsUrl + '?access_token=' + session.token;
+  var wsUrl = session.wsUrl + '?key=' + session.token;
   ws = new WebSocket(wsUrl);
 
   ws.onopen = function() {
@@ -1078,9 +1088,13 @@ async function startGeminiCall(session, thinkingLevel) {
     ws.send(JSON.stringify({ setup: session.sessionConfig }));
   };
 
+  ws.binaryType = 'arraybuffer';
   ws.onmessage = function(e) {
     var msg;
-    try { msg = JSON.parse(e.data); } catch(ex) { return; }
+    try {
+      var text = typeof e.data === 'string' ? e.data : new TextDecoder().decode(e.data);
+      msg = JSON.parse(text);
+    } catch(ex) { dbg('Parse error: ' + ex.message); return; }
 
     if (msg.setupComplete) {
       dbg('Gemini setup complete');
@@ -1127,6 +1141,7 @@ async function startGeminiCall(session, thinkingLevel) {
 
       if (msg.serverContent.turnComplete) {
         setThinking(false);
+        lastAssistantRow = null;
       }
     }
 
@@ -1168,12 +1183,12 @@ async function startMicCapture() {
       var base64 = arrayBufferToBase64(e.data);
       ws.send(JSON.stringify({
         realtimeInput: {
-          mediaChunks: [{ mimeType: 'audio/pcm;rate=16000', data: base64 }],
+          audio: [{ mimeType: 'audio/pcm;rate=16000', data: base64 }],
         },
       }));
     };
 
-    dbg('Mic capture started');
+    dbg('Mic capture started (AudioWorklet, ' + audioCtx.sampleRate + 'Hz -> 16kHz)');
   } catch (err) {
     dbg('Mic error: ' + err.message);
     setStatus('Mic error', 'error');
@@ -1235,7 +1250,7 @@ async function toggleScreenShare() {
           var base64 = reader.result.split(',')[1];
           ws.send(JSON.stringify({
             realtimeInput: {
-              mediaChunks: [{ mimeType: 'image/jpeg', data: base64 }],
+              video: [{ mimeType: 'image/jpeg', data: base64 }],
             },
           }));
         };
